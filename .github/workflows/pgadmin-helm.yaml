@@ -10,7 +10,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  APP_NAME: pgadmin
+  APP_NAME: pgadmin4
   HELM_OCI_REPO: ghcr.io/${{ github.repository_owner }}
   HELM_VERSION: 3.9.0
 
@@ -44,7 +44,7 @@ jobs:
       - name: Package Helm Chart
         id: package
         run: |
-          helm package --destination ${{ github.workspace }} --version ${{ steps.calver.outputs.BUILD_ID }} ${{ github.workspace }}/${{ env.APP_NAME }}/
+          helm package --destination ${{ github.workspace }} --version ${{ steps.calver.outputs.BUILD_ID }} ${{ github.workspace }}/charts/${{ env.APP_NAME }}/
 
       - name: Publish to GHCR
         run: |
