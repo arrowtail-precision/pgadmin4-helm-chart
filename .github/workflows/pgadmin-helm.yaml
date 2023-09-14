@@ -1,0 +1,51 @@
+name: pgadmin-helm
+
+on:
+  push:
+    branches:
+      - "main"
+    paths:
+      - "charts/pgadmin4/**"
+      - ".github/workflows/pgadmin-helm.yaml"
+
+env:
+  REGISTRY: ghcr.io
+  APP_NAME: pgadmin
+  HELM_OCI_REPO: ghcr.io/${{ github.repository_owner }}
+  HELM_VERSION: 3.9.0
+
+jobs:
+  helm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Generate Build ID
+        id: calver
+        run: |
+          # run=$(( GITHUB_RUN_NUMBER % 10 ))
+          run=${GITHUB_RUN_NUMBER}
+          # The minus sign in the "%-m" removes the leading zero
+          # otherwise 2022.0101.33 is an invalid semver because of the zero
+          ts=$(date +%Y.%-m%d)
+          echo "BUILD_ID=${ts}.${run}" >> $GITHUB_OUTPUT
+
+      - name: Install Helm
+        uses: Azure/setup-helm@v3
+        with:
+          version: ${{ env.HELM_VERSION }}
+
+      - name: Helm Login to GHCR
+        run: |
+          echo ${{ secrets.GITHUB_TOKEN }} | helm registry login ${{ env.HELM_OCI_REPO }} --username ${{ github.repository_owner }} --password-stdin
+
+      - name: Package Helm Chart
+        id: package
+        run: |
+          helm package --destination ${{ github.workspace }} --version ${{ steps.calver.outputs.BUILD_ID }} ${{ github.workspace }}/${{ env.APP_NAME }}/
+
+      - name: Publish to GHCR
+        run: |
+          helm push ${{ github.workspace }}/${{ env.APP_NAME }}-${{ steps.calver.outputs.BUILD_ID }}.tgz oci://${{ env.HELM_OCI_REPO }}
