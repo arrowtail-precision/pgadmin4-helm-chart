@@ -6,14 +6,12 @@ metadata:
   namespace: {{ include "pgadmin.namespaceName" . }}
   labels:
     {{- include "pgadmin.labels" . | nindent 4 }}
-{{- if .Values.annotations }}
-  annotations:
-  {{- if .Values.annotations }}
-    {{- .Values.annotations | toYaml | nindent 4 }}
-  {{- end }}
+{{- with .Values.annotations }}
+  annotations: {{- include "pgadmin.tplToMap" (dict "toMap" . "context" $) | nindent 4 }}
 {{- end }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: {{ .Values.revisionHistoryLimit }}
   selector:
     matchLabels:
       {{- include "pgadmin.selectorLabels" . | nindent 6 }}
@@ -27,33 +25,52 @@ spec:
         app.kubernetes.io/name: {{ include "pgadmin.name" . }}
         app.kubernetes.io/instance: {{ .Release.Name }}
         {{- with .Values.podLabels }}
-        {{- toYaml . | nindent 8 }}
+        {{- include "pgadmin.tplToMap" (dict "toMap" . "context" $) | nindent 8 }}
         {{- end }}
-    {{- if or (not .Values.existingSecret) .Values.podAnnotations }}
+        {{- with .Values.commonLabels }}
+        {{- include "pgadmin.tplToMap" (dict "toMap" . "context" $) | nindent 8 }}
+        {{- end }}
+    {{- if or (not .Values.existingSecret) .Values.podAnnotations .Values.templatedPodAnnotations (and .Values.serverDefinitions.enabled (not .Values.serverDefinitions.existingConfigmap) (not .Values.serverDefinitions.existingSecret)) (and .Values.preferences.enabled (not .Values.preferences.existingConfigMap)) }}
       annotations:
       {{- if .Values.podAnnotations }}
         {{- .Values.podAnnotations | toYaml | nindent 8 }}
       {{- end }}
+      {{- with .Values.templatedPodAnnotations }}
+        {{- tpl . $ | nindent 8 }}
+      {{- end }}
       {{- if not .Values.existingSecret }}
         checksum/secret: {{ include (print $.Template.BasePath "/auth-secret.yaml") . | sha256sum }}
       {{- end }}
+      {{- if and .Values.preferences.enabled (not .Values.preferences.existingConfigMap) }}
+        checksum/preferences: {{ include (print .Template.BasePath "/preferences-configmap.yaml") . | sha256sum }}
+      {{- end }}
     {{- end }}
-
     spec:
     {{- if .Values.serviceAccount.create }}
       serviceAccountName: {{ default $fullName .Values.serviceAccount.name }}
+    {{- end }}
+    {{- if .Values.hostAliases }}
+      hostAliases:
+      {{- range .Values.hostAliases }}
+      - ip: {{ .ip | quote }}
+        hostnames:
+        {{- range .hostnames }}
+        - {{ . | quote }}
+        {{- end }}
+      {{- end }}
     {{- end }}
       automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
     {{- if or (.Values.VolumePermissions.enabled) .Values.extraInitContainers }}
       initContainers:
       {{- if .Values.VolumePermissions.enabled }}
         - name: init-chmod-data
-          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "pgadmin.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/bin/chown", "-R", "5050:5050", "/var/lib/pgadmin"]
           volumeMounts:
             - name: pgadmin-data
               mountPath: /var/lib/pgadmin
+              subPath: "{{ .Values.persistentVolume.subPath }}"
           securityContext:
             runAsUser: 0
           resources:
@@ -68,7 +85,7 @@ spec:
     {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.registry }}/{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: {{ include "pgadmin.image" . | quote }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
         {{- if .Values.containerSecurityContext.enabled }}
           securityContext: {{- omit .Values.containerSecurityContext "enabled" | toYaml | nindent 12 }}
@@ -82,43 +99,55 @@ spec:
             {{- toYaml .Values.args | nindent 12 }}
         {{- end }}
           ports:
-            - name: http
+            - name: {{ .Values.service.portName }}
               containerPort: {{ .Values.containerPorts.http }}
               protocol: TCP
         {{- if .Values.livenessProbe }}
           livenessProbe:
             httpGet:
-              port: http
+              port: {{ .Values.service.portName }}
               {{- if .Values.env.contextPath }}
               path: "{{ .Values.env.contextPath }}/misc/ping"
               {{- else }}
               path: /misc/ping
+              {{- end }}
+              {{- if or (eq (.Values.service.portName | lower) "http") (eq (.Values.service.portName | lower) "https") }}
+              scheme: {{ upper .Values.service.portName }}
               {{- end }}
             {{- .Values.livenessProbe | toYaml | nindent 12 }}
         {{- end }}
         {{- if .Values.startupProbe }}
           startupProbe:
             httpGet:
-              port: http
+              port: {{ .Values.service.portName }}
               {{- if .Values.env.contextPath }}
               path: "{{ .Values.env.contextPath }}/misc/ping"
               {{- else }}
               path: /misc/ping
+              {{- end }}
+              {{- if or (eq (.Values.service.portName | lower) "http") (eq (.Values.service.portName | lower) "https") }}
+              scheme: {{ upper .Values.service.portName }}
               {{- end }}
             {{- .Values.startupProbe | toYaml | nindent 12 }}
         {{- end }}
         {{- if .Values.readinessProbe }}
           readinessProbe:
             httpGet:
-              port: http
+              port: {{ .Values.service.portName }}
               {{- if .Values.env.contextPath }}
               path: "{{ .Values.env.contextPath }}/misc/ping"
               {{- else }}
               path: /misc/ping
               {{- end }}
+              {{- if or (eq (.Values.service.portName | lower) "http") (eq (.Values.service.portName | lower) "https") }}
+              scheme: {{ upper .Values.service.portName }}
+              {{- end }}
             {{- .Values.readinessProbe | toYaml | nindent 12 }}
         {{- end }}
           env:
+          {{- with .Values.envVarsExtra }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
             - name: PGADMIN_CONFIG_ENHANCED_COOKIE_PROTECTION
               value: {{ .Values.env.enhanced_cookie_protection | quote }}
             - name: PGADMIN_DEFAULT_EMAIL
@@ -141,9 +170,15 @@ spec:
             - name: SCRIPT_NAME
               value: {{ .Values.env.contextPath }}
           {{- end }}
-          {{- if .Values.serverDefinitions.enabled }}
+          {{- if and (.Values.serverDefinitions.enabled) (or (eq .Values.serverDefinitions.resourceType "ConfigMap") (eq .Values.serverDefinitions.resourceType "Secret")) -}}
+          {{- if or (.Values.serverDefinitions.existingConfigmap) (.Values.serverDefinitions.existingSecret) (.Values.existingSecret) (.Values.serverDefinitions.servers) }}
             - name: PGADMIN_SERVER_JSON_FILE
               value: /pgadmin4/servers.json
+          {{- end }}
+          {{- end }}
+          {{- if .Values.preferences.enabled }}
+            - name: PGADMIN_PREFERENCES_JSON_FILE
+              value: /pgadmin4/preferences.json
           {{- end }}
           {{- range .Values.env.variables }}
             - name: {{ .name | quote }}
@@ -163,21 +198,29 @@ spec:
           volumeMounts:
             - name: pgadmin-data
               mountPath: /var/lib/pgadmin
-          {{- if .Values.serverDefinitions.enabled }}
+              subPath: "{{ .Values.persistentVolume.subPath }}"
+          {{- if and (.Values.serverDefinitions.enabled) (or (eq .Values.serverDefinitions.resourceType "ConfigMap") (eq .Values.serverDefinitions.resourceType "Secret")) -}}
+          {{- if or (.Values.serverDefinitions.existingConfigmap) (.Values.serverDefinitions.existingSecret) (.Values.existingSecret) (.Values.serverDefinitions.servers) }}
             - name: definitions
               mountPath: /pgadmin4/servers.json
               subPath: servers.json
           {{- end }}
+          {{- end }}
+          {{- if .Values.preferences.enabled }}
+            - name: preferences
+              mountPath: /pgadmin4/preferences.json
+              subPath: preferences.json
+          {{- end }}
           {{- range .Values.extraConfigmapMounts }}
             - name: {{ .name }}
               mountPath: {{ .mountPath }}
-              subPath: {{ .subPath | default "" }}
+              subPath: {{ .subPath }}
               readOnly: {{ .readOnly }}
           {{- end }}
           {{- range .Values.extraSecretMounts }}
             - name: {{ .name }}
               mountPath: {{ .mountPath }}
-              subPath: {{ .subPath | default "" }}
+              subPath: {{ .subPath }}
               readOnly: {{ .readOnly }}
           {{- end }}
           {{- if .Values.extraVolumeMounts }}
@@ -199,34 +242,43 @@ spec:
       {{- range .Values.extraConfigmapMounts }}
         - name: {{ .name }}
           configMap:
-            name: {{ .name }}
+            name: {{ tpl (.configMap) $ }}
             defaultMode: {{ .defaultMode | default 256 }}
       {{- end }}
       {{- range .Values.extraSecretMounts }}
         - name: {{ .name }}
           secret:
-            secretName: {{ .secret }}
+            secretName: {{ tpl (.secret) $ }}
             defaultMode: {{ .defaultMode | default 256 }}
       {{- end }}
       {{- if .Values.extraVolumes }}
         {{- .Values.extraVolumes | toYaml | nindent 8 }}
       {{- end }}
-      {{- if .Values.serverDefinitions.enabled }}
+      {{- if and (.Values.serverDefinitions.enabled) (eq .Values.serverDefinitions.resourceType "Secret") -}}
+        {{- if or (.Values.serverDefinitions.existingSecret) (.Values.existingSecret) (.Values.serverDefinitions.servers) }}
         - name: definitions
-          {{- if eq .Values.serverDefinitions.resourceType "Secret" }}
           secret:
-            secretName: {{ $fullName }}-server-definitions
-          {{- else }}
+            secretName: {{ include "pgadmin.serverDefinitionsSecret" . }}
+        {{- end }}
+      {{- else if and (.Values.serverDefinitions.enabled) (eq .Values.serverDefinitions.resourceType "ConfigMap") -}}
+        {{ if or (.Values.serverDefinitions.existingConfigmap) (.Values.serverDefinitions.servers) }}
+        - name: definitions
           configMap:
-            name: {{ $fullName }}-server-definitions
-          {{- end }}
+            name: {{ include "pgadmin.serverDefinitionsConfigmap" . }}
             items:
             - key: servers.json
               path: servers.json
+        {{- end }}
       {{- end }}
-    {{- if .Values.imagePullSecrets }}
+      {{- if .Values.preferences.enabled }}
+        - name: preferences
+          configMap:
+            name: {{ .Values.preferences.existingConfigMap | default (printf "%s-preferences" (include "pgadmin.fullname" .)) }}
+      {{- end }}
+    {{- if or .Values.imagePullSecrets .Values.global.imagePullSecrets }}
+    {{- $pullSecrets := include "pgadmin.imagePullSecrets" . }}
       imagePullSecrets:
-        {{- .Values.imagePullSecrets | toYaml | nindent 8 }}
+        {{ $pullSecrets | nindent 8 | trim }}
     {{- end }}
     {{- if .Values.nodeSelector }}
       nodeSelector:
@@ -243,4 +295,11 @@ spec:
     {{- if .Values.tolerations }}
       tolerations:
         {{- .Values.tolerations | toYaml | nindent 8 }}
+    {{- end }}
+    {{- if .Values.dnsPolicy }}
+      dnsPolicy: {{ .Values.dnsPolicy }}
+    {{- end }}
+    {{- if .Values.dnsConfig }}
+      dnsConfig:
+        {{- .Values.dnsConfig | toYaml | nindent 8 }}
     {{- end }}
